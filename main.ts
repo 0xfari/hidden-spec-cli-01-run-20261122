@@ -291,6 +291,8 @@ interface UHunk {
 interface USection {
   oldPath: string | null;
   newPath: string | null;
+  oldFromHeader: boolean;
+  newFromHeader: boolean;
   isCreate: boolean;
   isDelete: boolean;
   hunks: UHunk[];
@@ -323,7 +325,7 @@ function parseUnified(lines: string[], strict: boolean): Edit[] {
   };
 
   const startSection = (oldP: string | null, newP: string | null): void => {
-    sec = { oldPath: oldP, newPath: newP, isCreate: false, isDelete: false, hunks: [] };
+    sec = { oldPath: oldP, newPath: newP, oldFromHeader: false, newFromHeader: false, isCreate: false, isDelete: false, hunks: [] };
     sections.push(sec);
     phase = 'header';
   };
@@ -356,21 +358,23 @@ function parseUnified(lines: string[], strict: boolean): Edit[] {
       if (line.startsWith('--- ')) {
         if (!(lines[i + 1] ?? '').startsWith('+++ ')) throw new Exit2(`error: parse ${i + 2}`);
         sec.oldPath = diffPath(line);
+        sec.oldFromHeader = true;
         i += 1;
         continue;
       }
       if (line.startsWith('+++ ')) {
         sec.newPath = diffPath(line);
+        sec.newFromHeader = true;
         i += 1;
         continue;
       }
       if (line.startsWith('rename from ')) {
-        sec.oldPath = line.slice('rename from '.length).trim();
+        if (!sec.oldFromHeader) sec.oldPath = line.slice('rename from '.length).trim();
         i += 1;
         continue;
       }
       if (line.startsWith('rename to ')) {
-        sec.newPath = line.slice('rename to '.length).trim();
+        if (!sec.newFromHeader) sec.newPath = line.slice('rename to '.length).trim();
         i += 1;
         continue;
       }
@@ -399,6 +403,7 @@ function parseUnified(lines: string[], strict: boolean): Edit[] {
     if (line.startsWith('--- ') && (lines[i + 1] ?? '').startsWith('+++ ')) {
       startSection(null, null);
       sec!.oldPath = diffPath(line);
+      sec!.oldFromHeader = true;
       i += 1;
       continue;
     }
@@ -457,6 +462,17 @@ function backslashAfterLast(h: UHunk): boolean {
   return false;
 }
 
+/** Whether a `\` line follows the hunk's last `+` line (create branch only: SPEC §6 counts only the last `+` line). */
+function backslashAfterLastPlus(h: UHunk): boolean {
+  for (let j = h.body.length - 1; j >= 0; j -= 1) {
+    if (h.body[j]!.kind === 'new') {
+      const next = h.body[j + 1];
+      return next !== undefined && next.kind === 'backslash';
+    }
+  }
+  return false;
+}
+
 function unifiedEdit(s: USection, oldP: string, newP: string, strict: boolean): Edit {
   return (tree) => {
     if (oldP !== '/dev/null' && !safePath(oldP)) throw new Fail('unsafe', oldP);
@@ -473,7 +489,7 @@ function unifiedEdit(s: USection, oldP: string, newP: string, strict: boolean): 
       for (let k = s.hunks.length - 1; k >= 0; k -= 1) {
         const h = s.hunks[k]!;
         if (h.body.some((b) => b.kind === 'new')) {
-          finalBreak = !backslashAfterLast(h);
+          finalBreak = !backslashAfterLastPlus(h);
           break;
         }
       }
@@ -768,12 +784,10 @@ function v4aDeleteEdit(path: string): Edit {
 function v4aUpdateEdit(path: string, moveTo: string | null, chunks: VChunk[], strict: boolean): Edit {
   return (tree) => {
     if (!safePath(path)) throw new Fail('unsafe', path);
+    if (moveTo !== null && !safePath(moveTo)) throw new Fail('unsafe', moveTo);
     const before = tree.get(path);
     if (before === null) throw new Fail('missing', path);
-    if (moveTo !== null) {
-      if (!safePath(moveTo)) throw new Fail('unsafe', moveTo);
-      if (tree.get(moveTo) !== null) throw new Fail('exists', moveTo);
-    }
+    if (moveTo !== null && tree.get(moveTo) !== null) throw new Fail('exists', moveTo);
     const fl = splitFile(before);
     let lines = fl.lines;
     let cursor = 0;
